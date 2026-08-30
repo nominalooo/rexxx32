@@ -9,15 +9,39 @@ from firecrawl import FirecrawlApp
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-client     = anthropic.Anthropic(
-    api_key  = os.environ["ANTHROPIC_API_KEY"],
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-)
-exa        = Exa(api_key=os.environ["EXA_API_KEY"])
-firecrawl  = FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
-BASE_DIR   = Path(__file__).parent
-WORKSPACE  = BASE_DIR / "workspace"
-HISTORY_F  = BASE_DIR / "history.json"
+
+# ────────────────────────────────────────────────────────────
+# Безопасная инициализация с обработкой ошибок
+# ────────────────────────────────────────────────────────────
+client = None
+exa = None
+firecrawl = None
+INIT_ERROR = None
+
+try:
+    client = anthropic.Anthropic(
+        api_key = os.environ.get("ANTHROPIC_API_KEY"),
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    )
+except Exception as e:
+    INIT_ERROR = f"Anthropic init failed: {e}"
+    print(f"⚠️  {INIT_ERROR}")
+
+try:
+    exa = Exa(api_key=os.environ.get("EXA_API_KEY"))
+except Exception as e:
+    INIT_ERROR = f"Exa init failed: {e}"
+    print(f"⚠️  {INIT_ERROR}")
+
+try:
+    firecrawl = FirecrawlApp(api_key=os.environ.get("FIRECRAWL_API_KEY"))
+except Exception as e:
+    INIT_ERROR = f"Firecrawl init failed: {e}"
+    print(f"⚠️  {INIT_ERROR}")
+
+BASE_DIR = Path(__file__).parent
+WORKSPACE = BASE_DIR / "workspace"
+HISTORY_F = BASE_DIR / "history.json"
 WORKSPACE.mkdir(exist_ok=True)
 
 # ── SYSTEM PROMPT (full Rex V2) ─────────────────────────────
@@ -77,9 +101,9 @@ ALWAYS use tools to EXECUTE, not just explain. Write code → run it → show ou
 Формат (СТРОГО):
 > **📌 [Описание]** — [зачем это нужно, что ищем, что проверяем]
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-exa = Exa(api_key=os.environ["EXA_API_KEY"])
-firecrawl = FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+exa = Exa(api_key=os.environ.get("EXA_API_KEY"))
+firecrawl = FirecrawlApp(api_key=os.environ.get("FIRECRAWL_API_KEY"))
 
 НИКОГДА не запускай инструмент без этого описания. Рекс должен понимать что происходит в реальном времени."""
 
@@ -174,6 +198,8 @@ def do_list() -> str:
     return "\n".join(rows) if rows else "(empty)"
 
 def do_web_search(query: str, num_results: int = 8) -> str:
+    if not exa:
+        return "[Exa not initialized]"
     try:
         results = exa.search(query, num_results=min(int(num_results), 20), use_autoprompt=True)
         if not results.results:
@@ -186,6 +212,8 @@ def do_web_search(query: str, num_results: int = 8) -> str:
         return f"[Exa error] {e}"
 
 def do_web_fetch(url: str, formats: list = None) -> str:
+    if not firecrawl:
+        return "[Firecrawl not initialized]"
     try:
         result = firecrawl.scrape_url(url, formats=formats or ["markdown"])
         content = ""
@@ -274,6 +302,8 @@ async def download(filename: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
+    if INIT_ERROR:
+        return f"<h1>⚠️ Initialization Error</h1><p>{INIT_ERROR}</p><p>Check your environment variables.</p>"
     html_path = BASE_DIR / "index.html"
     if html_path.exists():
         return html_path.read_text()
@@ -281,28 +311,35 @@ async def root():
 
 @app.post("/chat")
 async def chat(request: Request):
+    if not client:
+        return JSONResponse({"error": "Anthropic client not initialized"}, status_code=503)
+    
     body = await request.json()
     messages = body.get("messages", [])
 
     def generate():
         msgs = list(messages)
         while True:
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8096,
-                system=SYSTEM,
-                tools=TOOLS,
-                messages=msgs
-            )
+            try:
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=8096,
+                    system=SYSTEM,
+                    tools=TOOLS,
+                    messages=msgs
+                )
+            except Exception as e:
+                yield f"data: {json.dumps({'type':'error','error':str(e)})}\\n\\n"
+                break
             
             for block in response.content:
                 if block.type == "text" and block.text:
-                    yield f"data: {json.dumps({'type':'text','text':block.text})}\n\n"
+                    yield f"data: {json.dumps({'type':'text','text':block.text})}\\n\\n"
 
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if response.stop_reason == "end_turn" or not tool_uses:
                 save_conversation(msgs)
-                yield "data: [DONE]\n\n"
+                yield "data: [DONE]\\n\\n"
                 break
 
             msgs.append({"role": "assistant", "content": response.content})
@@ -310,7 +347,7 @@ async def chat(request: Request):
 
             for tu in tool_uses:
                 result = run_tool(tu.name, tu.input)
-                yield f"data: {json.dumps({'type':'tool','name':tu.name,'result':result})}\n\n"
+                yield f"data: {json.dumps({'type':'tool','name':tu.name,'result':result})}\\n\\n"
                 tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
 
             if tool_results:
