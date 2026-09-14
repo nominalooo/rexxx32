@@ -359,7 +359,7 @@ async def chat(request: Request):
         while True:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=8096,
+                max_tokens=32000,
                 system=SYSTEM,
                 tools=TOOLS,
                 messages=msgs
