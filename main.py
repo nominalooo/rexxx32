@@ -12,7 +12,7 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 client     = anthropic.Anthropic(
     api_key  = os.environ["ANTHROPIC_API_KEY"],
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://claude-tokens.duckdns.org/v1")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 )
 exa        = Exa(api_key=os.environ["EXA_API_KEY"])
 firecrawl  = FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
